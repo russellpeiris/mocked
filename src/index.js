@@ -49,9 +49,8 @@ const Product = mongoose.model("Product", productSchema);
 
 // Cart Schema
 const cartSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-  product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
-  quantity: { type: Number, default: 1 },
+  email: String,
+  products: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
 });
 
 const Cart = mongoose.model("Cart", cartSchema);
@@ -68,13 +67,8 @@ const Feedback = mongoose.model("Feedback", feedbackSchema);
 
 // Order Schema
 const orderSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-  products: [
-    {
-      productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
-      quantity: Number,
-    },
-  ],
+  email: String,
+  product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
   totalAmount: Number,
   orderDate: { type: Date, default: Date.now },
   status: { type: String, default: "Pending" },
@@ -164,10 +158,30 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
+app.post("/products", async (req, res) => {
+  try {
+    const { name, price, description, category, imageUrl } = req.body;
+
+    const product = await Product.create({
+      name,
+      price,
+      description,
+      category,
+      imageUrl,
+    });
+
+    res
+      .status(201)
+      .json({ message: "Product created successfully", data: product });
+  } catch (error) {
+    res.status(500).json({ message: "Error creating product" });
+  }
+})
+
 // Get all Products and product feedback
 app.get("/products", async (req, res) => {
   try {
-    const products = await Product.find()
+    const products = await Product.find();
     res
       .status(200)
       .json({ message: "Products retrieved successfully", data: products });
@@ -176,30 +190,64 @@ app.get("/products", async (req, res) => {
   }
 });
 
-
-// Add to Cart
+// Add product to cart
 app.post("/cart", async (req, res) => {
   try {
-    const { email, productId } = req.body;
-    const cartItem = await Cart.create({ email, product: productId });
+    const { email, product } = req.body;
+
+    let cart = await Cart.findOne({ email });
+
+    if (!cart) {
+      cart = new Cart({ email, products: [product] });
+    } else {
+      if (!cart.products.includes(product)) {
+        cart.products.push(product);
+      } else {
+        return res.status(409).json({ message: "Product already in cart" });
+      }
+    }
+
+    await cart.save();
 
     res
       .status(201)
-      .json({ message: "Product added to cart successfully", data: cartItem });
+      .json({ message: "Product added to cart successfully", data: cart });
   } catch (error) {
     res.status(500).json({ message: "Error adding product to cart" });
   }
 });
 
-// Get Cart by User
 app.get("/cart", async (req, res) => {
   try {
     const { email } = req.query;
-    const cartItems = await Cart.find({ email }).populate("product");
 
-    res.status(200).json({ message: "Cart items retrieved", data: cartItems });
+    // Find the user's cart and populate the products array with product details
+    const cart = await Cart.findOne({ email }).populate("products");
+
+    if (!cart) {
+      return res.status(404).json({ message: "Cart not found" });
+    }
+
+    function getTotalAmount(priceString) {
+      return parseFloat(priceString.replace("$", ""));
+    }
+
+    // Example usage
+    const totalAmount = cart.products.reduce((acc, item) => {
+      return acc + getTotalAmount(item.price);
+    }, 0);
+
+    res.status(200).json({
+      message: "Cart fetched successfully",
+      data: {
+        products: cart.products,
+        totalAmount: totalAmount.toFixed(2),
+      },
+    });
   } catch (error) {
-    res.status(500).json({ message: "Error fetching cart items" });
+    res
+      .status(500)
+      .json({ message: "Error fetching cart items", error: error.message });
   }
 });
 
@@ -207,7 +255,6 @@ app.get("/cart", async (req, res) => {
 app.post("/product-feedback", async (req, res) => {
   try {
     const { email, productId, comment, rating } = req.body;
-    console.log(' req.body :',  req.body);
     const feedback = await Feedback.create({
       email,
       productId,
@@ -230,7 +277,9 @@ app.get("/product-feedback", async (req, res) => {
 
     // Validate query parameters
     if (!productId || !email) {
-      return res.status(400).json({ message: "productId and email are required" });
+      return res
+        .status(400)
+        .json({ message: "productId and email are required" });
     }
 
     // Find feedback by productId and email
@@ -238,7 +287,9 @@ app.get("/product-feedback", async (req, res) => {
 
     // Check if feedback was found
     if (!feedback) {
-      return res.status(404).json({ message: "No feedback found for this product and email" });
+      return res
+        .status(404)
+        .json({ message: "No feedback found for this product and email" });
     }
 
     res.status(200).json({
@@ -246,37 +297,40 @@ app.get("/product-feedback", async (req, res) => {
       data: feedback,
     });
   } catch (error) {
-    res.status(500).json({ message: "Error fetching feedback", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching feedback", error: error.message });
   }
 });
 
-
 // Place Order
-app.post("/orders", async (req, res) => {
+app.post("/place-order", async (req, res) => {
   try {
-    const { email } = req.body;
-    const cartItems = await Cart.find({ email }).populate("product");
+    const { email } = req.query;
+    const cart = await Cart.findOne({ email }).populate("products");
+    const products = cart.products;
 
-    if (!cartItems.length) {
+    if (!products.length) {
       return res
         .status(400)
         .json({ message: "No items in cart to place order" });
     }
-
-    let totalAmount = 0;
-    const products = cartItems.map((item) => {
-      totalAmount += item.product.price;
-      return {
-        productId: item.product._id,
-      };
+    //create order per product in cart
+    products.forEach(async (product) => {
+      await Order.create({
+        email,
+        product: product._id,
+        totalAmount: parseFloat(product.price.replace("$", "")),
+      });
     });
-
-    const order = await Order.create({ email, products, totalAmount });
     await Cart.deleteMany({ email });
 
-    res.status(201).json({ message: "Order placed successfully", data: order });
+    res.status(201).json({ message: "Order placed successfully" });
   } catch (error) {
-    res.status(500).json({ message: "Error placing order" });
+    console.error("Error placing order", error.message);
+    res
+      .status(500)
+      .json({ message: "Error placing order", error: error.message });
   }
 });
 
@@ -284,12 +338,55 @@ app.post("/orders", async (req, res) => {
 app.get("/orders", async (req, res) => {
   try {
     const { email } = req.query;
-    const orders = await Order.find({ email }).populate("products.productId");
+    const orders = await Order.find({ email }).populate("product");
+
+    function convertObjectIdToOrder(objectId) {
+      // Convert ObjectId to a string and extract the first 8 characters
+      const idString = objectId.toString().substring(0, 8);
+    
+      // Convert the hexadecimal string to a decimal number
+      const orderNumber = parseInt(idString, 16);
+    
+      return `Order ${orderNumber}`;
+    }
+
+    orders.forEach((order) => {
+      order._id = convertObjectIdToOrder(order._id);
+    });
+
+    console.log(orders)
+    
 
     res
       .status(200)
       .json({ message: "Orders retrieved successfully", data: orders });
   } catch (error) {
+    console.error("Error fetching orders", error.message);
     res.status(500).json({ message: "Error fetching orders" });
+  }
+});
+
+app.post("/request-cancel-order", async (req, res) => {
+  try {
+    const { orderId } = req.query;
+
+    const order = await Order.findById(orderId);
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (order.status === "Cancelled") {
+      return res.status(400).json({ message: "Order already cancelled" });
+    }
+
+    order.status = "Request Cancel";
+
+    await order.save();
+
+    res.status(200).json({ message: "Order cancellation requested" });
+  } catch (error) {
+    console.error("Error cancelling order", error.message);
+    res.status(500).json({ message: "Error cancelling order" });
   }
 });
